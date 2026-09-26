@@ -17,6 +17,10 @@ class ChargeResult:
     instructions: dict = field(default_factory=dict)
 
 
+class ProviderError(Exception):
+    """Acquirer menolak permintaan atau tidak bisa dihubungi."""
+
+
 class PaymentProvider(ABC):
     name: str
 
@@ -27,3 +31,7 @@ class PaymentProvider(ABC):
     @abstractmethod
     def refund(self, payment: Payment, amount: int) -> bool:
         """Kembalikan dana ke pelanggan. True jika berhasil."""
+
+    def check_status(self, payment: Payment) -> str | None:
+        """Tanya status ke acquirer: "PAID", "PENDING", "FAILED", atau None bila tidak didukung."""
+        return None

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from .db import Base, engine
-from .routers import admin, checkout, merchant, sandbox
+from .routers import admin, callbacks, checkout, merchant, sandbox
 
 
 def create_app() -> FastAPI:
@@ -14,6 +14,7 @@ def create_app() -> FastAPI:
     app.include_router(merchant.router)
     app.include_router(sandbox.router)
     app.include_router(checkout.router)
+    app.include_router(callbacks.router)
 
     @app.get("/health", tags=["system"])
     def health():

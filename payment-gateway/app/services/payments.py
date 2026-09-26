@@ -15,8 +15,9 @@ from ..models import (
     Refund,
     RefundStatus,
     WebhookDelivery,
+    new_id,
 )
-from ..providers import get_provider
+from ..providers import ProviderError, get_provider, select_provider
 from ..schemas import PaymentCreate, PaymentOut, RefundOut
 from .webhooks import enqueue_event
 
@@ -75,8 +76,12 @@ def create_payment(
     if dup:
         raise HTTPException(status.HTTP_409_CONFLICT, f"reference_id already used by {dup}")
 
-    provider = get_provider()
+    try:
+        provider = select_provider(data.method, data.channel)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     payment = Payment(
+        id=new_id("pay"),
         merchant_id=merchant.id,
         reference_id=data.reference_id,
         idempotency_key=idempotency_key,
@@ -97,6 +102,8 @@ def create_payment(
         result = provider.create_charge(payment)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     payment.provider_reference = result.provider_reference
     payment.instructions = result.instructions
     db.add(payment)
@@ -165,6 +172,26 @@ def refund_payment(
     event = "refund.succeeded" if ok else "refund.failed"
     delivery = enqueue_event(db, merchant, event, RefundOut.model_validate(refund).model_dump(mode="json"))
     return refund, delivery
+
+
+def sync_with_provider(db: Session, payment: Payment) -> WebhookDelivery | None:
+    """Tanya status ke acquirer dan terapkan. Dipakai oleh callback & rekonsiliasi."""
+    if payment.status not in (PaymentStatus.PENDING, PaymentStatus.EXPIRED):
+        return None
+    try:
+        remote = get_provider(payment.provider).check_status(payment)
+    except ProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if remote == "PAID":
+        # Dana sudah diterima acquirer: catat walaupun lewat batas waktu lokal.
+        payment.status = PaymentStatus.PENDING
+        payment.expires_at = max(_aware(payment.expires_at), datetime.now(timezone.utc) + timedelta(seconds=1))
+        return mark_paid(db, payment)
+    if remote == "FAILED" and payment.status == PaymentStatus.PENDING:
+        payment.status = PaymentStatus.FAILED
+        merchant = db.get(Merchant, payment.merchant_id)
+        return enqueue_event(db, merchant, "payment.failed", to_out(payment).model_dump(mode="json"))
+    return None
 
 
 def balance_of(db: Session, merchant_id: str) -> int:

@@ -24,7 +24,7 @@ Merchant ──API──▶  PAYMENT GATEWAY (aplikasi ini) ──webhook bertan
 | Model bisnis | Biaya MDR per metode (`app/fees.py`), ledger saldo (`PAYMENT`, `FEE`, `REFUND`) |
 | Webhook | `payment.created`, `payment.paid`, `payment.expired`, `refund.succeeded/failed`, tanda tangan HMAC-SHA256, log & retry |
 | Checkout | Halaman pembayaran `GET /checkout/{payment_id}` untuk pelanggan |
-| Acquirer | Adapter pluggable (`app/providers/`); saat ini `SimulatorProvider` untuk sandbox |
+| Acquirer | Adapter pluggable (`app/providers/`): **ShopeePay** (langsung) + `SimulatorProvider` untuk sandbox |
 
 ## Menjalankan
 
@@ -70,9 +70,13 @@ curl -X POST localhost:8000/v1/payments/pay_xxx/refunds -H "Authorization: Beare
 - `GET /admin/merchants/{id}/balance`
 - `POST /admin/jobs/expire-payments`, `POST /admin/jobs/retry-webhooks` (jalankan via cron, mis. tiap menit)
 
+**Acquirer**
+- `POST /callbacks/shopeepay` (notify URL ShopeePay)
+
 **Merchant** (header `Authorization: Bearer sk_…`)
 - `GET/PATCH /v1/me`
 - `POST /v1/payments`, `GET /v1/payments?status=PAID`, `GET /v1/payments/{id}`
+- `POST /v1/payments/{id}/sync` (cek status ke acquirer)
 - `POST/GET /v1/payments/{id}/refunds`
 - `GET /v1/balance`, `GET /v1/webhooks`
 - `POST /v1/simulate/payments/{id}/pay` (sandbox saja; 404 saat `ENVIRONMENT=production`)
@@ -97,6 +101,35 @@ mencegah pemrosesan ganda (webhook bisa dikirim lebih dari sekali).
 | QRIS | 0,7% (maks. transaksi Rp10.000.000) |
 | Virtual Account | Rp4.000 flat |
 | E-wallet | 1,5% |
+
+## Integrasi ShopeePay
+
+Pembayaran `method=EWALLET, channel=SHOPEEPAY` dikirim langsung ke ShopeePay bila
+kredensial `SHOPEEPAY_*` diisi (lihat `.env.example`); jika kosong, dipakai simulator.
+
+```
+Merchant ─POST /v1/payments─▶ Gateway ─order/create─▶ ShopeePay
+                                  ◀── redirect_url_http / redirect_url_app
+Pelanggan membuka checkout_url / deeplink_url, membayar di aplikasi Shopee
+ShopeePay ─POST /callbacks/shopeepay─▶ Gateway ─transaction/check─▶ ShopeePay  (konfirmasi ulang)
+                                          └─ PAID → ledger + webhook payment.paid ke merchant
+```
+
+- Request ditandatangani `X-Airpay-Req-H = base64(HMAC-SHA256(secret_key, body))` dengan header `X-Airpay-ClientId`.
+- Nominal dikirim x100 (Rp75.000 → `7500000`).
+- Notifikasi hanya diterima bila tanda tangan valid, lalu status **dikonfirmasi ulang** lewat
+  `transaction/check` (termasuk pencocokan nominal) sebelum pembayaran ditandai PAID. Notifikasi ganda aman.
+- Pembayaran yang lunas di ShopeePay tetap dicatat walau sudah lewat batas waktu lokal.
+- Jika callback terlambat, merchant bisa memanggil `POST /v1/payments/{id}/sync`.
+- Refund diteruskan ke endpoint refund ShopeePay.
+
+Langkah go-live ShopeePay:
+1. Daftar sebagai merchant/partner ShopeePay dan dapatkan `client_id`, `secret_key`,
+   `merchant_ext_id`, `store_ext_id` untuk UAT.
+2. Daftarkan notify URL: `https://<domain-anda>/callbacks/shopeepay`.
+3. **Cocokkan konstanta di `app/providers/shopeepay.py`** (path endpoint, kode status
+   `transaction/check`, format notifikasi) dengan dokumentasi resmi yang Anda terima.
+4. Jalankan uji UAT dari ShopeePay, lalu ganti `SHOPEEPAY_BASE_URL` ke produksi.
 
 ## Menambah acquirer sungguhan
 

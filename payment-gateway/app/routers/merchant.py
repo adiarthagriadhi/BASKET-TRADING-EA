@@ -94,6 +94,22 @@ def get_payment(
     return svc.to_out(payment)
 
 
+@router.post("/payments/{payment_id}/sync", response_model=PaymentOut)
+def sync_payment(
+    payment_id: str,
+    background: BackgroundTasks,
+    merchant: Merchant = Depends(get_current_merchant),
+    db: Session = Depends(get_db),
+):
+    """Tanyakan status terbaru ke acquirer (mis. bila callback terlambat)."""
+    payment = svc.get_payment_for_update(db, payment_id, merchant.id)
+    delivery = svc.sync_with_provider(db, payment)
+    db.commit()
+    if delivery:
+        background.add_task(deliver, delivery.id)
+    return svc.to_out(payment)
+
+
 @router.post("/payments/{payment_id}/refunds", response_model=RefundOut, status_code=201)
 def create_refund(
     payment_id: str,
